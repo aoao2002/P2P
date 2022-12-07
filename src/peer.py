@@ -11,18 +11,19 @@ import hashlib
 import argparse
 import pickle
 import logging
-from FSM import FSM, State, Action
+import time
+from FSM import FSM, State, Event
 
 """
 This is CS305 project skeleton code.
 Please refer to the example files - example/dumpreceiver.py and example/dumpsender.py - to learn how to play with this skeleton.
 """
 
-BUF_SIZE = 1400
+MAX_PAYLOAD = 1024
 CHUNK_DATA_SIZE = 512 * 1024
+BUF_SIZE = 1400
 HEADER_LEN = struct.calcsize("HBBHHII")
 HASH_LEN = 20
-MAX_PAYLOAD = 1024
 
 WHOHAS = 0
 IHAVE = 1
@@ -177,21 +178,24 @@ def process_inbound_udp(sock):
 
         logger.info(f'received GET pkt from {from_addr}, get: {bytes.hex(data)}')
 
-        # initialize peer's FSM
-        if from_addr not in peer_fsm:
-            peer_fsm[from_addr] = FSM(from_addr, bytes.hex(data))
-
         # increment concurrent send number
         num_concurrent_send += 1
-        chunk_data = config.haschunks[peer_fsm[from_addr].sending_chunhash_str][:MAX_PAYLOAD]
+        chunkhash_str = bytes.hex(data)
+        chunkdata = config.haschunks[chunkhash_str]
+
+        # initialize peer's FSM
+        peer_fsm[from_addr] = FSM(from_addr, chunkhash_str, chunkdata, config.timeout, logger)
+
+        # send first pkt
+        peer_fsm[from_addr].transit(sock, 0)
 
         # send back DATA
-        data_header = struct.pack("HBBHHII", socket.htons(MAGIC), TEAM, DATA, socket.htons(HEADER_LEN),
-                                  socket.htons(HEADER_LEN + len(chunk_data)), socket.htonl(1), 0)
-        sock.sendto(data_header + chunk_data, from_addr)
-        logger.info(f'sent DATA pkt to {from_addr}, seq: 1') 
-       
-    # this part is used to reply ACK after receiving DATA 
+        # pkt_data = chunkdata[:MAX_PAYLOAD]
+        # data_header = struct.pack("HBBHHII", socket.htons(MAGIC), TEAM, DATA, socket.htons(HEADER_LEN),
+        #                           socket.htons(HEADER_LEN + len(pkt_data)), socket.htonl(1), 0)
+        # sock.sendto(data_header + pkt_data, from_addr)
+        logger.info(f'sent DATA pkt to {from_addr}, seq: 1')
+
     elif Type == DATA:
         # TODO: receive DATA packet
         # TODO: distinguish packets to corresponding chunks
@@ -261,20 +265,11 @@ def process_inbound_udp(sock):
         ack_num = socket.ntohl(Ack)
         logger.info(f'received ACK pkt from {from_addr}, ACK num: {ack_num}')
         
-        peer_fsm[from_addr].transit()
+        peer_fsm[from_addr].transit(sock, ack_num)
+        if peer_fsm[from_addr].state == State.FINISHED:
+            # finished sending the chunk, remove the fsm
+            peer_fsm.pop(from_addr)
 
-        if (ack_num) * MAX_PAYLOAD >= CHUNK_DATA_SIZE:
-            # finished
-            print(f"finished sending {ex_sending_chunkhash}")
-            pass
-        else:
-            left = (ack_num) * MAX_PAYLOAD
-            right = min((ack_num + 1) * MAX_PAYLOAD, CHUNK_DATA_SIZE)
-            next_data = config.haschunks[ex_sending_chunkhash][left: right]
-            # send next data
-            data_header = struct.pack("HBBHHII", socket.htons(MAGIC), TEAM, DATA, socket.htons(HEADER_LEN),
-                                      socket.htons(HEADER_LEN + len(next_data)), socket.htonl(ack_num + 1), 0)
-            sock.sendto(data_header + next_data, from_addr)
     elif Type == DENIED:
         # TODO: deal with DENIED
         pass
@@ -294,6 +289,13 @@ def peer_run(config):
 
     try:
         while True:
+            for peer_addr, fsm in peer_fsm.items():
+                if time.perf_counter() - fsm.timer.send_time > fsm.timeout:
+                    # timeout occured, retransmit seq's pkt
+                    fsm.state = fsm.transition_table[fsm.state][Event.TIMEOUT](sock, fsm.timer.seq - 1)
+                    # double the timeout interval
+                    fsm.timeout *= 2
+                    logger.info(f'seq {fsm.timer.seq} to {peer_addr} timeout, retransmitted')
             ready = select.select([sock, sys.stdin], [], [], 0.1)
             read_ready = ready[0]
             if len(read_ready) > 0:
