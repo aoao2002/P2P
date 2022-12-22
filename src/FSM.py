@@ -1,18 +1,24 @@
-import enum
+from enum import Enum
 import struct
 import socket
 from collections import defaultdict, namedtuple
 import time
-from peer import *
+
+MAX_PAYLOAD = 1024
+MAGIC = 52305
+TEAM = 29
+CHUNK_DATA_SIZE = 512 * 1024
+HEADER_LEN = struct.calcsize("HBBHHII")
+DATA = 3
 
 Timer = namedtuple('Timer', ['seq', 'send_time'])
 
-class State(enum):
+class State(Enum):
     SLOW_START = 0
     CONGESTION_AVOIDANCE = 1
     FINISHED = 2
     
-class Event(enum):
+class Event(Enum):
     DUP_ACK = 0
     NEW_ACK = 1
     TIMEOUT = 2
@@ -52,7 +58,7 @@ class FSM():
         self.__new_acks = 0                              # num of new acks, only used in congestion avoidance
         self.__last_ack = -1                             # the last acked seq
 
-        self.timer = None                                # always times the lask unacked pkt 
+        self.timer = Timer(-1, -1)                       # always times the lask unacked pkt 
         self.state = State.SLOW_START
 
         # {old state: {event: event handler(sock, pkt) -> new state}}
@@ -85,6 +91,7 @@ class FSM():
         
         # received a new ACK, send data until cwnd is full
         prev_seq = ack_num # sequence number of last sent packet
+        self.__logger.debug(f'unacked: {self.__unacked}, cwnd: {self.__cwnd}')
         while self.__unacked <= self.__cwnd:
             if prev_seq * MAX_PAYLOAD >= CHUNK_DATA_SIZE:
                 # finished

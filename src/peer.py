@@ -12,7 +12,7 @@ import argparse
 import pickle
 import logging
 import time
-from FSM import FSM, State, Event
+from fsm import FSM, State, Event
 
 """
 This is CS305 project skeleton code.
@@ -295,7 +295,6 @@ def peer_run(config):
                     fsm.state = fsm.transition_table[fsm.state][Event.TIMEOUT](sock, fsm.timer.seq - 1)
                     # double the timeout interval
                     fsm.timeout *= 2
-                    logger.info(f'seq {fsm.timer.seq} to {peer_addr} timeout, retransmitted')
             ready = select.select([sock, sys.stdin], [], [], 0.1)
             read_ready = ready[0]
             if len(read_ready) > 0:
