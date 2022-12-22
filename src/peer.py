@@ -12,7 +12,7 @@ import argparse
 import pickle
 import logging
 import time
-from fsm import FSM, State, Event
+from FSM import FSM, State, Event
 
 """
 This is CS305 project skeleton code.
