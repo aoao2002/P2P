@@ -44,6 +44,8 @@ ex_sending_chunkhash = ''
 
 num_concurrent_send = 0
 
+# peer 和 seq 对应关系 其中key是peer的地址，value是上一次的seq
+peer_seq = dict()
 
 def process_download(sock, chunkfile, outputfile):
     """
@@ -163,7 +165,6 @@ def process_inbound_udp(sock):
                 sock.sendto(get_pkt, from_addr)
                 logger.info(f'sent GET pkt to {from_addr}, data: {bytes.hex(has_chunkhash)}')
                 break
-
     elif Type == GET:
         # TODO: deal with GET
 
@@ -175,17 +176,41 @@ def process_inbound_udp(sock):
         data_header = struct.pack("HBBHHII", socket.htons(MAGIC), TEAM, DATA, socket.htons(HEADER_LEN),
                                   socket.htons(HEADER_LEN), socket.htonl(1), 0)
         sock.sendto(data_header + chunk_data, from_addr)
-        # logger.info(f'sent DATA pkt to {from_addr}')
-
+        # logger.info(f'sent DATA pkt to {from_addr}') 
+       
+    # this part is used to reply ACK after receiving DATA 
     elif Type == DATA:
         # TODO: receive DATA packet
         # TODO: distinguish packets to corresponding chunks
-        ex_received_chunk[ex_downloading_chunkhash] += data
-
-        # send back ACK
-        ack_pkt = struct.pack("HBBHHII", socket.htons(MAGIC), TEAM, ACK, socket.htons(HEADER_LEN),
-                              socket.htons(HEADER_LEN), 0, Seq)
-        sock.sendto(ack_pkt, from_addr)
+        # 如果没有有这个peer，就添加到peer_seq字典中
+        print(from_addr)
+        if from_addr not in peer_seq:
+            peer_seq[from_addr] = Seq
+            ex_received_chunk[ex_downloading_chunkhash] += data
+            # send back ACK
+            ack_pkt = struct.pack("HBBHHII", socket.htons(MAGIC), TEAM, ACK, socket.htons(HEADER_LEN),
+                                  socket.htons(HEADER_LEN), 0, Seq)
+            sock.sendto(ack_pkt, from_addr)
+            logger.info(f'sent 1 ACK pkt to {from_addr}')
+        # 如果有这个peer，就判断seq是否是期望的
+        else:
+            last_send_seq = peer_seq[from_addr]
+            if socket.htonl(Seq) == socket.htonl(last_send_seq) + 1:
+                peer_seq[from_addr] = Seq
+                ex_received_chunk[ex_downloading_chunkhash] += data
+                # send back ACK
+                ack_pkt = struct.pack("HBBHHII", socket.htons(MAGIC), TEAM, ACK, socket.htons(HEADER_LEN),
+                                        socket.htons(HEADER_LEN), 0, Seq)
+                sock.sendto(ack_pkt, from_addr)
+                logger.info(f'sent 1 ACK pkt to {from_addr}')
+            else:
+                # send back ACK
+                ack_pkt = struct.pack("HBBHHII", socket.htons(MAGIC), TEAM, ACK, socket.htons(HEADER_LEN),
+                                        socket.htons(HEADER_LEN), 0, last_send_seq)
+                sock.sendto(ack_pkt, from_addr)
+                sock.sendto(ack_pkt, from_addr)
+                sock.sendto(ack_pkt, from_addr)
+                logger.info(f'sent 3 ACK pkts to {from_addr}')     
 
         # see if finished
         # TODO: request unrequested chunks when finish receiving a chunk
@@ -213,7 +238,8 @@ def process_inbound_udp(sock):
                 print("Congrats! You have completed the example!")
             else:
                 print("Example fails. Please check the example files carefully.")
-            # decrement concurrent send number
+
+            # decrement concurrent send number 
             num_concurrent_send -= 1
 
     elif Type == ACK:
@@ -232,7 +258,6 @@ def process_inbound_udp(sock):
             data_header = struct.pack("HBBHHII", socket.htons(MAGIC), TEAM, DATA, socket.htons(HEADER_LEN),
                                       socket.htons(HEADER_LEN + len(next_data)), socket.htonl(ack_num + 1), 0)
             sock.sendto(data_header + next_data, from_addr)
-
     elif Type == DENIED:
         # TODO: deal with DENIED
         pass
