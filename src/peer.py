@@ -11,17 +11,19 @@ import hashlib
 import argparse
 import pickle
 import logging
+import time
+from fsm import FSM, State, Event
 
 """
 This is CS305 project skeleton code.
 Please refer to the example files - example/dumpreceiver.py and example/dumpsender.py - to learn how to play with this skeleton.
 """
 
-BUF_SIZE = 1400
+MAX_PAYLOAD = 1024
 CHUNK_DATA_SIZE = 512 * 1024
+BUF_SIZE = 1400
 HEADER_LEN = struct.calcsize("HBBHHII")
 HASH_LEN = 20
-MAX_PAYLOAD = 1024
 
 WHOHAS = 0
 IHAVE = 1
@@ -30,7 +32,7 @@ DATA = 3
 ACK = 4
 DENIED = 5
 
-Code2Type = ['WHOHAS', 'IHAVE', 'GET', 'DATA', 'ACK', 'DENIED']
+# Code2Type = ['WHOHAS', 'IHAVE', 'GET', 'DATA', 'ACK', 'DENIED']
 
 TEAM = 29
 MAGIC = 52305
@@ -41,6 +43,7 @@ ex_downloading_chunkhash = ""
 received_chunks = dict()
 peer_chunkhashes = dict()
 ex_sending_chunkhash = ''
+peer_fsm = dict()
 
 num_concurrent_send = 0
 
@@ -101,11 +104,12 @@ def process_inbound_udp(sock):
     global received_chunks
     global peer_chunkhashes
     global ex_sending_chunkhash
+    global peer_fsm
     # Receive pkt
     pkt, from_addr = sock.recvfrom(BUF_SIZE)
     Magic, Team, Type, hlen, plen, Seq, Ack = struct.unpack("HBBHHII", pkt[:HEADER_LEN])
     data = pkt[HEADER_LEN:]
-    logger.info(f'received {Code2Type[Type]} pkt from {from_addr}, data: {bytes.hex(data) if Type != DATA else ""}')
+    # logger.info(f'received {Code2Type[Type]} pkt from {from_addr}, data: {bytes.hex(data) if Type != DATA else ""}')
 
     if Type == WHOHAS:
         # TODO: send IHAVE packet
@@ -122,6 +126,8 @@ def process_inbound_udp(sock):
 
         # see what chunk the sender has
         whohas_chunk_hashes = [data[i:i + HASH_LEN] for i in range(0, len(data), HASH_LEN)]
+
+        logger.info(f'received WHOHAS pkt from {from_addr}, whohas: {map(bytes.hex, whohas_chunk_hashes)}')
 
         # bytes to hex_str
         has_hash = bytes()
@@ -148,6 +154,8 @@ def process_inbound_udp(sock):
         # see what chunk the sender has
         has_chunkhashes = [data[i:i + HASH_LEN] for i in range(0, len(data), HASH_LEN)]
 
+        logger.info(f'received IHAVE pkt from {from_addr}, ihave: {map(bytes.hex, has_chunkhashes)}')
+
         # TODO: send back GET pkt
         # TODO: design a policy to determine request which chunk from which peer
         # request the first unrequsted chunk from each peer
@@ -168,17 +176,26 @@ def process_inbound_udp(sock):
     elif Type == GET:
         # TODO: deal with GET
 
+        logger.info(f'received GET pkt from {from_addr}, get: {bytes.hex(data)}')
+
         # increment concurrent send number
         num_concurrent_send += 1
-        chunk_data = config.haschunks[ex_sending_chunkhash][:MAX_PAYLOAD]
+        chunkhash_str = bytes.hex(data)
+        chunkdata = config.haschunks[chunkhash_str]
+
+        # initialize peer's FSM
+        peer_fsm[from_addr] = FSM(from_addr, chunkhash_str, chunkdata, config.timeout, logger)
+
+        # send first pkt
+        peer_fsm[from_addr].transit(sock, 0)
 
         # send back DATA
-        data_header = struct.pack("HBBHHII", socket.htons(MAGIC), TEAM, DATA, socket.htons(HEADER_LEN),
-                                  socket.htons(HEADER_LEN), socket.htonl(1), 0)
-        sock.sendto(data_header + chunk_data, from_addr)
-        # logger.info(f'sent DATA pkt to {from_addr}') 
-       
-    # this part is used to reply ACK after receiving DATA 
+        # pkt_data = chunkdata[:MAX_PAYLOAD]
+        # data_header = struct.pack("HBBHHII", socket.htons(MAGIC), TEAM, DATA, socket.htons(HEADER_LEN),
+        #                           socket.htons(HEADER_LEN + len(pkt_data)), socket.htonl(1), 0)
+        # sock.sendto(data_header + pkt_data, from_addr)
+        logger.info(f'sent DATA pkt to {from_addr}, seq: 1')
+
     elif Type == DATA:
         # TODO: receive DATA packet
         # TODO: distinguish packets to corresponding chunks
@@ -246,18 +263,13 @@ def process_inbound_udp(sock):
         # TODO: deal with ACK
         # received an ACK pkt
         ack_num = socket.ntohl(Ack)
-        if (ack_num) * MAX_PAYLOAD >= CHUNK_DATA_SIZE:
-            # finished
-            print(f"finished sending {ex_sending_chunkhash}")
-            pass
-        else:
-            left = (ack_num) * MAX_PAYLOAD
-            right = min((ack_num + 1) * MAX_PAYLOAD, CHUNK_DATA_SIZE)
-            next_data = config.haschunks[ex_sending_chunkhash][left: right]
-            # send next data
-            data_header = struct.pack("HBBHHII", socket.htons(MAGIC), TEAM, DATA, socket.htons(HEADER_LEN),
-                                      socket.htons(HEADER_LEN + len(next_data)), socket.htonl(ack_num + 1), 0)
-            sock.sendto(data_header + next_data, from_addr)
+        logger.info(f'received ACK pkt from {from_addr}, ACK num: {ack_num}')
+        
+        peer_fsm[from_addr].transit(sock, ack_num)
+        if peer_fsm[from_addr].state == State.FINISHED:
+            # finished sending the chunk, remove the fsm
+            peer_fsm.pop(from_addr)
+
     elif Type == DENIED:
         # TODO: deal with DENIED
         pass
@@ -277,6 +289,12 @@ def peer_run(config):
 
     try:
         while True:
+            for peer_addr, fsm in peer_fsm.items():
+                if time.perf_counter() - fsm.timer.send_time > fsm.timeout:
+                    # timeout occured, retransmit seq's pkt
+                    fsm.state = fsm.transition_table[fsm.state][Event.TIMEOUT](sock, fsm.timer.seq - 1)
+                    # double the timeout interval
+                    fsm.timeout *= 2
             ready = select.select([sock, sys.stdin], [], [], 0.1)
             read_ready = ready[0]
             if len(read_ready) > 0:
