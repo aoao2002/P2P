@@ -194,40 +194,41 @@ def process_inbound_udp(sock):
         # data_header = struct.pack("HBBHHII", socket.htons(MAGIC), TEAM, DATA, socket.htons(HEADER_LEN),
         #                           socket.htons(HEADER_LEN + len(pkt_data)), socket.htonl(1), 0)
         # sock.sendto(data_header + pkt_data, from_addr)
-        logger.info(f'sent DATA pkt to {from_addr}, seq: 1')
+        # logger.info(f'sent DATA pkt to {from_addr}, seq: 1')
 
     elif Type == DATA:
         # TODO: receive DATA packet
         # TODO: distinguish packets to corresponding chunks
         # 如果没有有这个peer，就添加到peer_seq字典中
-        print(from_addr)
+        # print(from_addr)
+        Seq = socket.ntohl(Seq)
         if from_addr not in peer_seq:
             peer_seq[from_addr] = Seq
             ex_received_chunk[ex_downloading_chunkhash] += data
             # send back ACK
             ack_pkt = struct.pack("HBBHHII", socket.htons(MAGIC), TEAM, ACK, socket.htons(HEADER_LEN),
-                                  socket.htons(HEADER_LEN), 0, Seq)
+                                  socket.htons(HEADER_LEN), 0, socket.htonl(Seq))
             sock.sendto(ack_pkt, from_addr)
-            logger.info(f'sent 1 ACK pkt to {from_addr}')
+            logger.info(f'sent ACK pkt to {from_addr}, ACK: {Seq}')
         # 如果有这个peer，就判断seq是否是期望的
         else:
-            last_send_seq = peer_seq[from_addr]
-            if socket.htonl(Seq) == socket.htonl(last_send_seq) + 1:
+            last_received_seq = peer_seq[from_addr]
+            if Seq == last_received_seq + 1:
                 peer_seq[from_addr] = Seq
                 ex_received_chunk[ex_downloading_chunkhash] += data
                 # send back ACK
                 ack_pkt = struct.pack("HBBHHII", socket.htons(MAGIC), TEAM, ACK, socket.htons(HEADER_LEN),
-                                        socket.htons(HEADER_LEN), 0, Seq)
+                                        socket.htons(HEADER_LEN), 0, socket.htonl(Seq))
                 sock.sendto(ack_pkt, from_addr)
-                logger.info(f'sent 1 ACK pkt to {from_addr}')
+                logger.info(f'in order, sent ACK pkt to {from_addr}, ACK: {Seq}')
             else:
                 # send back ACK
                 ack_pkt = struct.pack("HBBHHII", socket.htons(MAGIC), TEAM, ACK, socket.htons(HEADER_LEN),
-                                        socket.htons(HEADER_LEN), 0, last_send_seq)
+                                        socket.htons(HEADER_LEN), 0, socket.htonl(last_received_seq))
                 sock.sendto(ack_pkt, from_addr)
-                sock.sendto(ack_pkt, from_addr)
-                sock.sendto(ack_pkt, from_addr)
-                logger.info(f'sent 3 ACK pkts to {from_addr}')     
+                # sock.sendto(ack_pkt, from_addr)
+                # sock.sendto(ack_pkt, from_addr)
+                logger.info(f'out of order, sent ACK pkts to {from_addr}, ACK: {last_received_seq}')     
 
         # see if finished
         # TODO: request unrequested chunks when finish receiving a chunk

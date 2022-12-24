@@ -51,12 +51,13 @@ class FSM():
 
         self.__logger = logger
 
-        self.__cwnd = 1                                  # congestion window
-        self.__unacked = 0                               # num of sent but unacked pkt
+        self.__cwnd = 0                                  # congestion window
+        self.__unacked = 1                               # num of sent but unacked pkt
         self.__ssthresh = 64                             # ssthresh
         self.__dup_acks = defaultdict(int)               # duplicate ack num per seq-ack round
         self.__new_acks = 0                              # num of new acks, only used in congestion avoidance
         self.__last_ack = -1                             # the last acked seq
+        self.__last_sent = 0                             # the last sent pkt seq
 
         self.timer = Timer(-1, -1)                       # always times the lask unacked pkt 
         self.state = State.SLOW_START
@@ -72,8 +73,9 @@ class FSM():
         if ack_num <= self.__last_ack:
             event = Event.DUP_ACK
         else:
-            self.__last_ack = ack_num
+            # self.__last_ack = ack_num
             event = Event.NEW_ACK
+        self.__logger.debug(f'state: {self.state}, event: {event}')
         self.state = self.transition_table[self.state][event](sock, ack_num)
 
     def __send_data(self, sock, ack_num):
@@ -91,24 +93,25 @@ class FSM():
         
         # received a new ACK, send data until cwnd is full
         prev_seq = ack_num # sequence number of last sent packet
-        self.__logger.debug(f'unacked: {self.__unacked}, cwnd: {self.__cwnd}')
-        while self.__unacked <= self.__cwnd:
+        # self.__logger.debug(f'before sending, unacked: {self.__unacked}, cwnd: {self.__cwnd}')
+        while self.__unacked < self.__cwnd:
             if prev_seq * MAX_PAYLOAD >= CHUNK_DATA_SIZE:
                 # finished
                 self.__logger.info(f"finished sending {self.__sending_chunkhash_str}")
                 self.state = State.FINISHED
                 break
             else:
-                left = prev_seq * MAX_PAYLOAD
-                right = min((prev_seq + 1) * MAX_PAYLOAD, CHUNK_DATA_SIZE)
+                left = self.__last_sent * MAX_PAYLOAD
+                right = min((self.__last_sent + 1) * MAX_PAYLOAD, CHUNK_DATA_SIZE)
                 next_data = self.__sending_chunkdata[left: right]
                 # send next data
                 data_header = struct.pack("HBBHHII", socket.htons(MAGIC), TEAM, DATA, socket.htons(HEADER_LEN),
-                                        socket.htons(HEADER_LEN + len(next_data)), socket.htonl(prev_seq + 1), 0)
+                                        socket.htons(HEADER_LEN + len(next_data)), socket.htonl(self.__last_sent + 1), 0)
                 sock.sendto(data_header + next_data, self.__addr)
-                self.__logger.info(f'sent DATA pkt tp {self.__addr}, seq: {prev_seq + 1}')
+                self.__logger.info(f'sent DATA pkt to {self.__addr}, seq: {self.__last_sent + 1}')
                 self.__unacked += 1
-                prev_seq += 1
+                self.__last_sent += 1
+        # self.__logger.debug(f'finished sending, unacked: {self.__unacked}, cwnd: {self.__cwnd}')
 
     def __fast_retransmit(self, sock, ack_num):
         left = ack_num * MAX_PAYLOAD
@@ -152,6 +155,8 @@ class FSM():
     def __slow_start_new_ack(self, sock, ack_num):
         self.__unacked -= (ack_num - self.__last_ack)
         self.__cwnd += (ack_num - self.__last_ack)
+        self.__last_ack = ack_num
+        # self.__logger.debug(f'slow start new ack, unacked: {self.__unacked}, cwnd: {self.__cwnd}')
         self.__send_data(sock, ack_num)
         if self.__cwnd >= self.__ssthresh:
             return self.transition_table[State.SLOW_START][Event.CWND_TOO_LARGE](sock, ack_num)
@@ -175,9 +180,11 @@ class FSM():
     def __congestion_avoidance_new_ack(self, sock, ack_num):
         self.__new_acks += (ack_num - self.__last_ack)
         self.__unacked -= (ack_num - self.__last_ack)
-        if self.__new_ACKs >= self.__cwnd:
+        self.__last_ack = ack_num
+        if self.__new_acks >= self.__cwnd:
             self.__cwnd += 1
             self.__new_acks = 0
+        self.__logger.debug(f'congestion avoidance new ack, unacked: {self.__unacked}, cwnd: {self.__cwnd}')
         self.__send_data(sock, ack_num)
         return State.CONGESTION_AVOIDANCE
 
@@ -190,13 +197,13 @@ class FSM():
     def __congestion_avoidance_fast_retransmit(self, sock, ack_num):
         self.__ssthresh = max(self.__cwnd // 2, 2)
         self.__cwnd = 1
-        self.__new_ACKs = 0
+        self.__new_acks = 0
         self.__fast_retransmit(sock, ack_num)
         return State.SLOW_START
 
     def __congestion_avoidance_timeout_retransmit(self, sock, ack_num):
         self.__ssthresh = max(self.__cwnd // 2, 2)
         self.__cwnd = 1
-        self.__new_ACKs = 0
+        self.__new_acks = 0
         self.__timeout_retransmit(sock, ack_num)
         return State.SLOW_START
