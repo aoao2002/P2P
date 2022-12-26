@@ -70,10 +70,14 @@ class FSM():
         self.__add_event_handler()
 
     def transit(self, sock, ack_num):
+        self.__logger.debug(f'last ack: {self.__last_ack}, ack: {ack_num}')
         if ack_num <= self.__last_ack:
             event = Event.DUP_ACK
+        elif ack_num == 512:
+            self.state = State.FINISHED
+            self.__logger.info(f"finished sending {self.__sending_chunkhash_str}")
+            return
         else:
-            # self.__last_ack = ack_num
             event = Event.NEW_ACK
         self.__logger.debug(f'state: {self.state}, event: {event}')
         self.state = self.transition_table[self.state][event](sock, ack_num)
@@ -90,27 +94,21 @@ class FSM():
                 self.timeout = self.__original_timeout
         # restart timer
         self.timer = Timer(ack_num + 1, time.perf_counter())
-        
+        if self.__last_sent * MAX_PAYLOAD >= CHUNK_DATA_SIZE:
+            return
         # received a new ACK, send data until cwnd is full
-        prev_seq = ack_num # sequence number of last sent packet
-        # self.__logger.debug(f'before sending, unacked: {self.__unacked}, cwnd: {self.__cwnd}')
+        self.__logger.debug(f'before sending, unacked: {self.__unacked}, cwnd: {self.__cwnd}')
         while self.__unacked < self.__cwnd:
-            if prev_seq * MAX_PAYLOAD >= CHUNK_DATA_SIZE:
-                # finished
-                self.__logger.info(f"finished sending {self.__sending_chunkhash_str}")
-                self.state = State.FINISHED
-                break
-            else:
-                left = self.__last_sent * MAX_PAYLOAD
-                right = min((self.__last_sent + 1) * MAX_PAYLOAD, CHUNK_DATA_SIZE)
-                next_data = self.__sending_chunkdata[left: right]
-                # send next data
-                data_header = struct.pack("HBBHHII", socket.htons(MAGIC), TEAM, DATA, socket.htons(HEADER_LEN),
-                                        socket.htons(HEADER_LEN + len(next_data)), socket.htonl(self.__last_sent + 1), 0)
-                sock.sendto(data_header + next_data, self.__addr)
-                self.__logger.info(f'sent DATA pkt to {self.__addr}, seq: {self.__last_sent + 1}')
-                self.__unacked += 1
-                self.__last_sent += 1
+            left = self.__last_sent * MAX_PAYLOAD
+            right = min((self.__last_sent + 1) * MAX_PAYLOAD, CHUNK_DATA_SIZE)
+            next_data = self.__sending_chunkdata[left: right]
+            # send next data
+            data_header = struct.pack("HBBHHII", socket.htons(MAGIC), TEAM, DATA, socket.htons(HEADER_LEN),
+                                    socket.htons(HEADER_LEN + len(next_data)), socket.htonl(self.__last_sent + 1), 0)
+            sock.sendto(data_header + next_data, self.__addr)
+            self.__logger.info(f'sent DATA pkt to {self.__addr}, seq: {self.__last_sent + 1}')
+            self.__unacked += 1
+            self.__last_sent += 1
         # self.__logger.debug(f'finished sending, unacked: {self.__unacked}, cwnd: {self.__cwnd}')
 
     def __fast_retransmit(self, sock, ack_num):
@@ -121,6 +119,8 @@ class FSM():
         data_header = struct.pack("HBBHHII", socket.htons(MAGIC), TEAM, DATA, socket.htons(HEADER_LEN),
                                     socket.htons(HEADER_LEN + len(retransmit_data)), socket.htonl(ack_num + 1), 0)
         sock.sendto(data_header + retransmit_data, self.__addr)
+        self.__unacked = 1
+        self.__last_sent = ack_num + 1
         self.__logger.info(f'fast retransmit DATA pkt to {self.__addr}, seq: {ack_num + 1}')
 
     def __timeout_retransmit(self, sock, ack_num):
