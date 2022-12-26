@@ -37,11 +37,11 @@ DENIED = 5
 TEAM = 29
 MAGIC = 52305
 
+finished = dict()
 ex_output_file = None
-ex_received_chunk = dict()
 ex_downloading_chunkhash = ""
 received_chunks = dict()
-peer_chunkhashes = dict()
+peer_chunkhash_str = dict()
 ex_sending_chunkhash = ''
 peer_fsm = dict()
 
@@ -56,8 +56,9 @@ def process_download(sock, chunkfile, outputfile):
     """
     # print('PROCESS DOWNLOAD SKELETON CODE CALLED.  Fill me in!')
     global ex_output_file
-    global ex_received_chunk
+    global received_chunks
     global ex_downloading_chunkhash
+    global finished
 
     ex_output_file = outputfile
     download_hash = bytes()  # list of chunkhashes
@@ -67,12 +68,11 @@ def process_download(sock, chunkfile, outputfile):
     # TODO: send WHOHAS packet
     # TODO: remove already had chunks from requested chunks
     for chunkhash_str in chunkhash_strs:
-        ex_received_chunk[chunkhash_str] = bytes()
-        ex_downloading_chunkhash = chunkhash_str
         if chunkhash_str not in config.haschunks:
             # hex_str to bytes
             chunkhash = bytes.fromhex(chunkhash_str)
             download_hash += chunkhash
+            finished[chunkhash_str] = False
 
     # Step2: make WHOHAS pkt
     # |2byte magic|1byte team |1byte type|
@@ -102,9 +102,10 @@ def process_download(sock, chunkfile, outputfile):
 def process_inbound_udp(sock):
     global num_concurrent_send
     global received_chunks
-    global peer_chunkhashes
+    global peer_chunkhash_str
     global ex_sending_chunkhash
     global peer_fsm
+    global finished
     # Receive pkt
     pkt, from_addr = sock.recvfrom(BUF_SIZE)
     Magic, Team, Type, hlen, plen, Seq, Ack = struct.unpack("HBBHHII", pkt[:HEADER_LEN])
@@ -164,8 +165,8 @@ def process_inbound_udp(sock):
         # if yes, request it
         for has_chunkhash in has_chunkhashes:
             if has_chunkhash not in received_chunks:
-                peer_chunkhashes[from_addr] = has_chunkhashes
-                received_chunks[has_chunkhash] = bytes()
+                peer_chunkhash_str[from_addr] = bytes.hex(has_chunkhash)
+                received_chunks[bytes.hex(has_chunkhash)] = bytes()
                 get_header = struct.pack("HBBHHII", socket.htons(MAGIC), TEAM, GET, socket.htons(HEADER_LEN),
                                          socket.htons(HEADER_LEN + len(has_chunkhash)), socket.htonl(0),
                                          socket.htonl(0))
@@ -173,6 +174,7 @@ def process_inbound_udp(sock):
                 sock.sendto(get_pkt, from_addr)
                 logger.info(f'sent GET pkt to {from_addr}, data: {bytes.hex(has_chunkhash)}')
                 break
+
     elif Type == GET:
         # TODO: deal with GET
 
@@ -204,7 +206,7 @@ def process_inbound_udp(sock):
         Seq = socket.ntohl(Seq)
         if from_addr not in peer_seq:
             peer_seq[from_addr] = Seq
-            ex_received_chunk[ex_downloading_chunkhash] += data
+            received_chunks[peer_chunkhash_str[from_addr]] += data
             # send back ACK
             ack_pkt = struct.pack("HBBHHII", socket.htons(MAGIC), TEAM, ACK, socket.htons(HEADER_LEN),
                                   socket.htons(HEADER_LEN), 0, socket.htonl(Seq))
@@ -215,12 +217,12 @@ def process_inbound_udp(sock):
             last_received_seq = peer_seq[from_addr]
             if Seq == last_received_seq + 1:
                 peer_seq[from_addr] = Seq
-                ex_received_chunk[ex_downloading_chunkhash] += data
+                received_chunks[peer_chunkhash_str[from_addr]] += data
                 # send back ACK
                 ack_pkt = struct.pack("HBBHHII", socket.htons(MAGIC), TEAM, ACK, socket.htons(HEADER_LEN),
                                         socket.htons(HEADER_LEN), 0, socket.htonl(Seq))
                 sock.sendto(ack_pkt, from_addr)
-                logger.info(f'in order, sent ACK pkt to {from_addr}, ACK: {Seq}')
+                logger.info(f'recv seq: {Seq}, sent ACK pkt to {from_addr}, ACK: {Seq}')
             else:
                 # send back ACK
                 ack_pkt = struct.pack("HBBHHII", socket.htons(MAGIC), TEAM, ACK, socket.htons(HEADER_LEN),
@@ -228,37 +230,41 @@ def process_inbound_udp(sock):
                 sock.sendto(ack_pkt, from_addr)
                 # sock.sendto(ack_pkt, from_addr)
                 # sock.sendto(ack_pkt, from_addr)
-                logger.info(f'out of order, sent ACK pkts to {from_addr}, ACK: {last_received_seq}')     
+                logger.info(f'recv seq: {Seq}, sent ACK pkts to {from_addr}, ACK: {last_received_seq}')     
 
         # see if finished
         # TODO: request unrequested chunks when finish receiving a chunk
-        if len(ex_received_chunk[ex_downloading_chunkhash]) == CHUNK_DATA_SIZE:
+        if len(received_chunks[peer_chunkhash_str[from_addr]]) == CHUNK_DATA_SIZE:
             # finished downloading this chunkdata!
-            # dump your received chunk to file in dict form using pickle
-            with open(ex_output_file, "wb") as wf:
-                pickle.dump(ex_received_chunk, wf)
+            finished[peer_chunkhash_str[from_addr]] = True
 
-            # add to this peer's haschunk:
-            config.haschunks[ex_downloading_chunkhash] = ex_received_chunk[ex_downloading_chunkhash]
+            # see if finished downloading all chunks
+            if all(finished.values()):
+                # dump your received chunk to file in dict form using pickle
+                with open(ex_output_file, "wb") as wf:
+                    pickle.dump(received_chunks, wf)
 
-            # you need to print "GOT" when finished downloading all chunks in a DOWNLOAD file
-            print(f"GOT {ex_output_file}")
+                # add to this peer's haschunk:
+                config.haschunks[ex_downloading_chunkhash] = received_chunks[ex_downloading_chunkhash]
 
-            # The following things are just for illustration, you do not need to print out in your design.
-            sha1 = hashlib.sha1()
-            sha1.update(ex_received_chunk[ex_downloading_chunkhash])
-            received_chunkhash_str = sha1.hexdigest()
-            print(f"Expected chunkhash: {ex_downloading_chunkhash}")
-            print(f"Received chunkhash: {received_chunkhash_str}")
-            success = ex_downloading_chunkhash == received_chunkhash_str
-            print(f"Successful received: {success}")
-            if success:
-                print("Congrats! You have completed the example!")
-            else:
-                print("Example fails. Please check the example files carefully.")
+                # you need to print "GOT" when finished downloading all chunks in a DOWNLOAD file
+                print(f"GOT {ex_output_file}")
 
-            # decrement concurrent send number 
-            num_concurrent_send -= 1
+                # The following things are just for illustration, you do not need to print out in your design.
+                sha1 = hashlib.sha1()
+                sha1.update(received_chunks[ex_downloading_chunkhash])
+                received_chunkhash_str = sha1.hexdigest()
+                print(f"Expected chunkhash: {ex_downloading_chunkhash}")
+                print(f"Received chunkhash: {received_chunkhash_str}")
+                success = ex_downloading_chunkhash == received_chunkhash_str
+                print(f"Successful received: {success}")
+                if success:
+                    print("Congrats! You have completed the example!")
+                else:
+                    print("Example fails. Please check the example files carefully.")
+
+                # decrement concurrent send number 
+                num_concurrent_send -= 1
 
     elif Type == ACK:
         # TODO: deal with ACK
