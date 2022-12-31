@@ -10,14 +10,14 @@ TEAM = 29
 CHUNK_DATA_SIZE = 512 * 1024
 HEADER_LEN = struct.calcsize("HBBHHII")
 DATA = 3
+TTL = 5
 
 Timer = namedtuple('Timer', ['seq', 'send_time'])
 
 class State(Enum):
     SLOW_START = 0
     CONGESTION_AVOIDANCE = 1
-    Fast_RECOVERY = 2
-    FINISHED = 3
+    FINISHED = 2
     
 class Event(Enum):
     DUP_ACK = 0
@@ -52,7 +52,7 @@ class FSM():
 
         self.__logger = logger
 
-        self.cwnd = 0                                  # congestion window
+        self.__cwnd = 0                                  # congestion window
         self.__unacked = 1                               # num of sent but unacked pkt
         self.__ssthresh = 64                             # ssthresh
         self.__dup_acks = defaultdict(int)               # duplicate ack num per seq-ack round
@@ -63,16 +63,17 @@ class FSM():
         self.timer = Timer(-1, -1)                       # always times the lask unacked pkt 
         self.state = State.SLOW_START
 
+        self.ttl = TTL 
+
         # {old state: {event: event handler(sock, pkt) -> new state}}
         self.transition_table = {
             State.SLOW_START: dict(),
-            State.CONGESTION_AVOIDANCE: dict(),
-            State.Fast_RECOVERY: dict(),
+            State.CONGESTION_AVOIDANCE: dict()
         } 
         self.__add_event_handler()
 
     def transit(self, sock, ack_num):
-        self.__logger.info(f'last ack: {self.__last_ack}, ack: {ack_num}')
+        self.__logger.debug(f'last ack: {self.__last_ack}, ack: {ack_num}')
         if ack_num <= self.__last_ack:
             event = Event.DUP_ACK
         elif ack_num == 512:
@@ -81,7 +82,13 @@ class FSM():
             return
         else:
             event = Event.NEW_ACK
-        self.__logger.info(f'state: {self.state}, event: {event}')
+            # restart timer
+            # now we use GBN, so we just need to time next one 
+            # if we implement selective retransmission we need to time the next unack seq
+            self.timer = Timer(ack_num + 1, time.perf_counter())
+            self.ttl = TTL
+
+        self.__logger.debug(f'state: {self.state}, event: {event}')
         self.state = self.transition_table[self.state][event](sock, ack_num)
 
     def __send_data(self, sock, ack_num):
@@ -94,13 +101,14 @@ class FSM():
                 self.timeout = self.__estimated_RTT + 4 * self.__dev_RTT
             else:
                 self.timeout = self.__original_timeout
-        # restart timer
-        self.timer = Timer(ack_num + 1, time.perf_counter())
+
+        # self.timer = Timer(ack_num + 1, time.perf_counter())
+        
         if self.__last_sent * MAX_PAYLOAD >= CHUNK_DATA_SIZE:
             return
         # received a new ACK, send data until cwnd is full
-        self.__logger.info(f'before sending, unacked: {self.__unacked}, cwnd: {self.cwnd}')
-        while self.__unacked < self.cwnd:
+        self.__logger.debug(f'before sending, unacked: {self.__unacked}, cwnd: {self.__cwnd}')
+        while self.__unacked < self.__cwnd:
             left = self.__last_sent * MAX_PAYLOAD
             right = min((self.__last_sent + 1) * MAX_PAYLOAD, CHUNK_DATA_SIZE)
             next_data = self.__sending_chunkdata[left: right]
@@ -111,7 +119,7 @@ class FSM():
             self.__logger.info(f'sent DATA pkt to {self.__addr}, seq: {self.__last_sent + 1}')
             self.__unacked += 1
             self.__last_sent += 1
-        # self.__logger.info(f'finished sending, unacked: {self.__unacked}, cwnd: {self.__cwnd}')
+        # self.__logger.debug(f'finished sending, unacked: {self.__unacked}, cwnd: {self.__cwnd}')
 
     def __fast_retransmit(self, sock, ack_num):
         left = ack_num * MAX_PAYLOAD
@@ -135,21 +143,21 @@ class FSM():
         sock.sendto(data_header + retransmit_data, self.__addr)
         # restart timer
         self.timer = Timer(self.timer.seq, time.perf_counter())
+
+        # change ttl to check if alive
+        self.ttl -= 1 
         self.__logger.info(f'timeout retransmit DATA pkt to {self.__addr}, seq: {self.timer.seq}')
 
     def __add_event_handler(self):
         self.transition_table[State.SLOW_START][Event.DUP_ACK] = self.__slow_start_dup_ack
         self.transition_table[State.SLOW_START][Event.NEW_ACK] = self.__slow_start_new_ack
-        self.transition_table[State.SLOW_START][Event.THREE_DUP_ACKS] = self.__slow_start_three_dup_ack
-        self.transition_table[State.SLOW_START][Event.TIMEOUT] = self.__slow_start_timeout
+        self.transition_table[State.SLOW_START][Event.THREE_DUP_ACKS] = self.__slow_start_fast_retransmit
+        self.transition_table[State.SLOW_START][Event.TIMEOUT] = self.__slow_start_timeout_retransmit
         self.transition_table[State.SLOW_START][Event.CWND_TOO_LARGE] = self.__slow_start_cwnd_too_large
         self.transition_table[State.CONGESTION_AVOIDANCE][Event.NEW_ACK] = self.__congestion_avoidance_new_ack
         self.transition_table[State.CONGESTION_AVOIDANCE][Event.DUP_ACK] = self.__congestion_avoidance_dup_ack
-        self.transition_table[State.CONGESTION_AVOIDANCE][Event.THREE_DUP_ACKS] = self.__congestion_avoidance_three_dup_ack
-        self.transition_table[State.CONGESTION_AVOIDANCE][Event.TIMEOUT] = self.__congestion_avoidance_timeout
-        self.transition_table[State.Fast_RECOVERY][Event.NEW_ACK] = self.__fast_recovery_new_ack
-        self.transition_table[State.Fast_RECOVERY][Event.TIMEOUT] = self.__fast_recovery_timeout
-        self.transition_table[State.Fast_RECOVERY][Event.DUP_ACK] = self.__fast_recovery_dup_ack
+        self.transition_table[State.CONGESTION_AVOIDANCE][Event.THREE_DUP_ACKS] = self.__congestion_avoidance_fast_retransmit
+        self.transition_table[State.CONGESTION_AVOIDANCE][Event.TIMEOUT] = self.__congestion_avoidance_timeout_retransmit
 
     def __slow_start_dup_ack(self, sock, ack_num):
         self.__dup_acks[ack_num] += 1
@@ -159,23 +167,23 @@ class FSM():
 
     def __slow_start_new_ack(self, sock, ack_num):
         self.__unacked -= (ack_num - self.__last_ack)
-        self.cwnd += (ack_num - self.__last_ack)
+        self.__cwnd += (ack_num - self.__last_ack)
         self.__last_ack = ack_num
-        # self.__logger.info(f'slow start new ack, unacked: {self.__unacked}, cwnd: {self.__cwnd}')
+        # self.__logger.debug(f'slow start new ack, unacked: {self.__unacked}, cwnd: {self.__cwnd}')
         self.__send_data(sock, ack_num)
-        if self.cwnd >= self.__ssthresh:
+        if self.__cwnd >= self.__ssthresh:
             return self.transition_table[State.SLOW_START][Event.CWND_TOO_LARGE](sock, ack_num)
         return State.SLOW_START
 
-    def __slow_start_three_dup_ack(self, sock, ack_num):
-        self.__ssthresh = max(self.cwnd // 2, 2)
-        self.cwnd = self.__ssthresh + 3
+    def __slow_start_fast_retransmit(self, sock, ack_num):
+        self.__ssthresh = max(self.__cwnd // 2, 2)
+        self.__cwnd = 1
         self.__fast_retransmit(sock, ack_num)
-        return State.Fast_RECOVERY
+        return State.SLOW_START
 
-    def __slow_start_timeout(self, sock, ack_num):
-        self.__ssthresh = max(self.cwnd // 2, 2)
-        self.cwnd = 1
+    def __slow_start_timeout_retransmit(self, sock, ack_num):
+        self.__ssthresh = max(self.__cwnd // 2, 2)
+        self.__cwnd = 1
         self.__timeout_retransmit(sock, ack_num)
         return State.SLOW_START
 
@@ -186,10 +194,10 @@ class FSM():
         self.__new_acks += (ack_num - self.__last_ack)
         self.__unacked -= (ack_num - self.__last_ack)
         self.__last_ack = ack_num
-        if self.__new_acks >= self.cwnd:
-            self.cwnd += 1
+        if self.__new_acks >= self.__cwnd:
+            self.__cwnd += 1
             self.__new_acks = 0
-        self.__logger.info(f'congestion avoidance new ack, unacked: {self.__unacked}, cwnd: {self.cwnd}')
+        self.__logger.debug(f'congestion avoidance new ack, unacked: {self.__unacked}, cwnd: {self.__cwnd}')
         self.__send_data(sock, ack_num)
         return State.CONGESTION_AVOIDANCE
 
@@ -199,33 +207,16 @@ class FSM():
             return self.transition_table[State.CONGESTION_AVOIDANCE][Event.THREE_DUP_ACKS](sock, ack_num)
         return State.CONGESTION_AVOIDANCE
 
-    def __congestion_avoidance_three_dup_ack(self, sock, ack_num):
-        self.__ssthresh = max(self.cwnd // 2, 2)
-        self.cwnd = self.__ssthresh + 3
+    def __congestion_avoidance_fast_retransmit(self, sock, ack_num):
+        self.__ssthresh = max(self.__cwnd // 2, 2)
+        self.__cwnd = 1
         self.__new_acks = 0
         self.__fast_retransmit(sock, ack_num)
-        return State.Fast_RECOVERY
-    
-    def __fast_recovery_new_ack(self, sock, ack_num):
-        self.__dup_acks[ack_num] = 0
-        self.cwnd = self.__ssthresh
-        return State.CONGESTION_AVOIDANCE
-
-    def __fast_recovery_dup_ack(self, sock, ack_num): 
-        self.cwnd += 1
-        self.__send_data(sock, ack_num)
-        return State.Fast_RECOVERY
-
-    def __fast_recovery_timeout(self, sock, ack_num):
-        self.__ssthresh = max(self.cwnd // 2, 2)
-        self.cwnd = 1
-        self.__dup_acks[ack_num] = 0
-        self.__timeout_retransmit(sock, ack_num)
         return State.SLOW_START
 
-    def __congestion_avoidance_timeout(self, sock, ack_num):
-        self.__ssthresh = max(self.cwnd // 2, 2)
-        self.cwnd = 1
+    def __congestion_avoidance_timeout_retransmit(self, sock, ack_num):
+        self.__ssthresh = max(self.__cwnd // 2, 2)
+        self.__cwnd = 1
         self.__new_acks = 0
         self.__timeout_retransmit(sock, ack_num)
         return State.SLOW_START
