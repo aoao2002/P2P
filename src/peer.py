@@ -166,15 +166,16 @@ def process_inbound_udp(sock):
         # check if there're still unrequested chunks when finished receiving a chunk from a peer
         # if yes, request it
         for has_chunkhash in has_chunkhashes:
-            if has_chunkhash not in received_chunks:
-                peer_chunkhash_str[from_addr] = bytes.hex(has_chunkhash)
-                received_chunks[bytes.hex(has_chunkhash)] = bytes()
+            has_chunkhash_str = bytes.hex(has_chunkhash)
+            if has_chunkhash_str not in received_chunks:
+                peer_chunkhash_str[from_addr] = has_chunkhash_str
+                received_chunks[has_chunkhash_str] = bytes()
                 get_header = struct.pack("HBBHHII", socket.htons(MAGIC), TEAM, GET, socket.htons(HEADER_LEN),
                                          socket.htons(HEADER_LEN + len(has_chunkhash)), socket.htonl(0),
                                          socket.htonl(0))
                 get_pkt = get_header + has_chunkhash
                 sock.sendto(get_pkt, from_addr)
-                logger.info(f'sent GET pkt to {from_addr}, data: {bytes.hex(has_chunkhash)}')
+                logger.info(f'sent GET pkt to {from_addr}, data: {has_chunkhash_str}')
                 break
 
     elif Type == GET:
@@ -249,20 +250,20 @@ def process_inbound_udp(sock):
                 config.haschunks[ex_downloading_chunkhash] = received_chunks[ex_downloading_chunkhash]
 
                 # you need to print "GOT" when finished downloading all chunks in a DOWNLOAD file
-                print(f"GOT {ex_output_file}")
+                logger.info(f"GOT {ex_output_file}")
 
                 # The following things are just for illustration, you do not need to print out in your design.
                 sha1 = hashlib.sha1()
                 sha1.update(received_chunks[ex_downloading_chunkhash])
                 received_chunkhash_str = sha1.hexdigest()
-                print(f"Expected chunkhash: {ex_downloading_chunkhash}")
-                print(f"Received chunkhash: {received_chunkhash_str}")
+                logger.info(f"Expected chunkhash: {ex_downloading_chunkhash}")
+                logger.info(f"Received chunkhash: {received_chunkhash_str}")
                 success = ex_downloading_chunkhash == received_chunkhash_str
-                print(f"Successful received: {success}")
+                logger.info(f"Successful received: {success}")
                 if success:
-                    print("Congrats! You have completed the example!")
+                    logger.info("Congrats! You have completed the example!")
                 else:
-                    print("Example fails. Please check the example files carefully.")
+                    logger.info("Example fails. Please check the example files carefully.")
 
                 # decrement concurrent send number 
                 num_concurrent_send -= 1
