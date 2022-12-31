@@ -10,6 +10,7 @@ TEAM = 29
 CHUNK_DATA_SIZE = 512 * 1024
 HEADER_LEN = struct.calcsize("HBBHHII")
 DATA = 3
+TTL = 5
 
 Timer = namedtuple('Timer', ['seq', 'send_time'])
 
@@ -63,6 +64,8 @@ class FSM():
         self.timer = Timer(-1, -1)                       # always times the lask unacked pkt 
         self.state = State.SLOW_START
 
+        self.ttl = TTL 
+
         # {old state: {event: event handler(sock, pkt) -> new state}}
         self.transition_table = {
             State.SLOW_START: dict(),
@@ -81,6 +84,12 @@ class FSM():
             return
         else:
             event = Event.NEW_ACK
+            # restart timer
+            # now we use GBN, so we just need to time next one 
+            # if we implement selective retransmission we need to time the next unack seq
+            self.timer = Timer(ack_num + 1, time.perf_counter())
+            self.ttl = TTL
+
         self.__logger.info(f'state: {self.state}, event: {event}')
         self.state = self.transition_table[self.state][event](sock, ack_num)
 
@@ -94,8 +103,9 @@ class FSM():
                 self.timeout = self.__estimated_RTT + 4 * self.__dev_RTT
             else:
                 self.timeout = self.__original_timeout
-        # restart timer
-        self.timer = Timer(ack_num + 1, time.perf_counter())
+
+        # self.timer = Timer(ack_num + 1, time.perf_counter())
+        
         if self.__last_sent * MAX_PAYLOAD >= CHUNK_DATA_SIZE:
             return
         # received a new ACK, send data until cwnd is full
@@ -135,6 +145,9 @@ class FSM():
         sock.sendto(data_header + retransmit_data, self.__addr)
         # restart timer
         self.timer = Timer(self.timer.seq, time.perf_counter())
+
+        # change ttl to check if alive
+        self.ttl -= 1 
         self.__logger.info(f'timeout retransmit DATA pkt to {self.__addr}, seq: {self.timer.seq}')
 
     def __add_event_handler(self):
