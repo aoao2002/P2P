@@ -40,8 +40,8 @@ MAGIC = 52305
 finished = dict()
 ex_output_file = None
 ex_downloading_chunkhash = ""
-received_chunks = dict()
-peer_chunkhash_str = dict()
+received_chunks = dict()    # hashstr to data
+peer_chunkhash_str = dict() # ip to hashstr
 ex_sending_chunkhash = ''
 peer_fsm = dict()
 num_concurrent_send = 0
@@ -167,15 +167,17 @@ def process_inbound_udp(sock):
         # check if there're still unrequested chunks when finished receiving a chunk from a peer
         # if yes, request it
         for has_chunkhash in has_chunkhashes:
-            if has_chunkhash not in received_chunks:
-                peer_chunkhash_str[from_addr] = bytes.hex(has_chunkhash)
-                received_chunks[bytes.hex(has_chunkhash)] = bytes()
+            has_chunkhash_str = bytes.hex(has_chunkhash)
+            
+            if has_chunkhash_str not in received_chunks:
+                peer_chunkhash_str[from_addr] = has_chunkhash_str
+                received_chunks[has_chunkhash_str] = bytes()
                 get_header = struct.pack("HBBHHII", socket.htons(MAGIC), TEAM, GET, socket.htons(HEADER_LEN),
                                          socket.htons(HEADER_LEN + len(has_chunkhash)), socket.htonl(0),
                                          socket.htonl(0))
                 get_pkt = get_header + has_chunkhash
                 sock.sendto(get_pkt, from_addr)
-                logger.info(f'sent GET pkt to {from_addr}, data: {bytes.hex(has_chunkhash)}')
+                logger.info(f'sent GET pkt to {from_addr}, data: {has_chunkhash_str}')
                 break
 
     elif Type == GET:
@@ -299,30 +301,29 @@ def process_user_input(sock):
 def restart_download(sock):
     logger.debug('begin restart_download')
     download_hash = bytes()
-    for hash, if_finish in finished.items():
-        logger.debug(f'check: {hash} {type(hash)}')
+    
+    for hash_str, if_finish in finished.items():
         if not if_finish:
-            logger.debug(f'1')
-            download_hash += hash.encode("utf-8")
-            logger.debug(f'2')
-            received_chunks.pop(hash)
-            logger.debug(f'hash not finish: {hash}')
+            hash =  bytes.fromhex(hash_str)
+            download_hash += hash
+            if hash_str in received_chunks:
+                received_chunks.pop(hash_str)
+            # received_chunks[hash_str] = bytes()
 
     whohas_header = struct.pack("HBBHHII", socket.htons(MAGIC), TEAM, WHOHAS, socket.htons(HEADER_LEN),
                                     socket.htons(HEADER_LEN + len(download_hash)), socket.htonl(0), socket.htonl(0))
     whohas_pkt = whohas_header + download_hash
 
-    logger.debug('ready for sent')
     peer_list = config.peers
     for p in peer_list:  # nodeid, hostname, port
         if int(p[0]) != config.identity:
             sock.sendto(whohas_pkt, (p[1], int(p[2])))
-    logger.debug('finish restart')
 
 def peer_run(config):
     addr = (config.ip, config.port)
     sock = simsocket.SimSocket(config.identity, addr, verbose=config.verbose)
     global peer_fsm
+    global last_get_data_time
 
     try:
         while True:
@@ -333,11 +334,13 @@ def peer_run(config):
                     fsm.state = fsm.transition_table[fsm.state][Event.TIMEOUT](sock, fsm.timer.seq - 1)
                     # double the timeout interval
                     fsm.timeout *= 2
-                if fsm.ttl == 0:
-                    dead_peers.append[peer_addr]
+                # if fsm.ttl == 0:
+                #     dead_peers.append[peer_addr]
             # clear dead peer
             # for f_addr in dead_peers:
             #     peer_fsm.pop(f_addr)
+            #     logger.debug('peer crash')
+            
 
             ready = select.select([sock, sys.stdin], [], [], 0.1)
             read_ready = ready[0]
@@ -346,18 +349,18 @@ def peer_run(config):
                     process_inbound_udp(sock)
                 if sys.stdin in read_ready:
                     process_user_input(sock)
+            else:
+                # No pkt nor input arrives during this period 
+                pass
 
             # no conn left but tasks not all finish --> send WHOHAS for unfinisg tasks
             if not last_get_data_time is None:
-                if time.time()-last_get_data_time > 3 and not all(finished.values()):
-           
+                logger.debug(f'dataTime: {time.time()-last_get_data_time }')
+                if time.time()-last_get_data_time > 5 and not all(finished.values()):
+                    last_get_data_time = time.time()
                     restart_download(sock)
-            
-            else:
-                
-                
-                # No pkt nor input arrives during this period 
-                pass
+
+
     except KeyboardInterrupt:
         pass
     finally:
