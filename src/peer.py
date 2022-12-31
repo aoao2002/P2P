@@ -12,6 +12,8 @@ import argparse
 import pickle
 import logging
 import time
+from matplotlib import pyplot as plt
+from collections import defaultdict
 from FSM import FSM, State, Event
 
 """
@@ -202,7 +204,6 @@ def process_inbound_udp(sock):
         # TODO: receive DATA packet
         # TODO: distinguish packets to corresponding chunks
         # 如果没有有这个peer，就添加到peer_seq字典中
-        # print(from_addr)
         Seq = socket.ntohl(Seq)
         if from_addr not in peer_seq:
             peer_seq[from_addr] = Seq
@@ -293,6 +294,10 @@ def process_user_input(sock):
 def peer_run(config):
     addr = (config.ip, config.port)
     sock = simsocket.SimSocket(config.identity, addr, verbose=config.verbose)
+    # 统计window size
+    window_size = defaultdict(list)
+    # 统计window size 此时的时间
+    time_window_size = defaultdict(list)
 
     try:
         while True:
@@ -302,6 +307,10 @@ def peer_run(config):
                     fsm.state = fsm.transition_table[fsm.state][Event.TIMEOUT](sock, fsm.timer.seq - 1)
                     # double the timeout interval
                     fsm.timeout *= 2
+                time_passed = time.perf_counter() - start
+                time_window_size[peer_addr].append(time_passed)
+                window_size[peer_addr].append(fsm.cwnd)
+                logger.info(f'peer_addr: {peer_addr}, fsm.__cwnd: {fsm.cwnd}')
             ready = select.select([sock, sys.stdin], [], [], 0.1)
             read_ready = ready[0]
             if len(read_ready) > 0:
@@ -315,8 +324,18 @@ def peer_run(config):
     except KeyboardInterrupt:
         pass
     finally:
+        plot_window_size(addr,time_window_size, window_size)
+        logger.info(window_size)
         sock.close()
 
+def plot_window_size(addr,time_window_size, window_size):
+    plt.figure()
+    for peer_addr, time_window_size_list in time_window_size.items():
+        plt.plot(time_window_size_list, window_size[peer_addr], label=f'{addr} to {peer_addr}')
+    plt.xlabel('time')
+    plt.ylabel('window size')
+    plt.legend()
+    plt.savefig('window_size.png')
 
 if __name__ == '__main__':
     """
@@ -339,4 +358,5 @@ if __name__ == '__main__':
 
     config = bt_utils.BtConfig(args)
     logger = logging.getLogger(f"PEER{args.i}_LOGGER")
+    start = time.perf_counter()
     peer_run(config)

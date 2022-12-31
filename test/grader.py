@@ -30,7 +30,7 @@ class PeerProc:
         cmd = f"python3 -u {self.peer_file_loc} -p {self.node_map_loc} -c {self.haschunk_loc} -m {self.max_transmit} -i {self.id} -t {self.timeout}"
         self.process = subprocess.Popen(cmd.split(" "), stdin=subprocess.PIPE,stdout=subprocess.DEVNULL,text=True, bufsize=1, universal_newlines=True)
         # ensure peer is running
-        time.sleep(0.1) 
+        time.sleep(1) 
 
     def send_cmd(self, cmd):
         self.process.stdin.write(cmd)
